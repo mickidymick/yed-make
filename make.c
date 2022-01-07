@@ -1,60 +1,42 @@
 #include <yed/plugin.h>
-#include <yed/highlight.h>
+#include <yed/syntax.h>
 
-#define ARRAY_LOOP(a) for (__typeof((a)[0]) *it = (a); it < (a) + (sizeof(a) / sizeof((a)[0])); ++it)
+static yed_syntax syn;
 
-highlight_info hinfo;
+#define _CHECK(x, r)                                                      \
+do {                                                                      \
+    if (x) {                                                              \
+        LOG_FN_ENTER();                                                   \
+        yed_log("[!] " __FILE__ ":%d regex error for '%s': %s", __LINE__, \
+                r,                                                        \
+                yed_syntax_get_regex_err(&syn));                          \
+        LOG_EXIT();                                                       \
+    }                                                                     \
+} while (0)
 
-void unload(yed_plugin *self);
-void syntax_sh_line_handler(yed_event *event);
+#define SYN()          yed_syntax_start(&syn)
+#define ENDSYN()       yed_syntax_end(&syn)
+#define APUSH(s)       yed_syntax_attr_push(&syn, s)
+#define APOP(s)        yed_syntax_attr_pop(&syn)
+#define RANGE(r)       _CHECK(yed_syntax_range_start(&syn, r), r)
+#define ONELINE()      yed_syntax_range_one_line(&syn)
+#define SKIP(r)        _CHECK(yed_syntax_range_skip(&syn, r), r)
+#define ENDRANGE(r)    _CHECK(yed_syntax_range_end(&syn, r), r)
+#define REGEX(r)       _CHECK(yed_syntax_regex(&syn, r), r)
+#define REGEXSUB(r, g) _CHECK(yed_syntax_regex_sub(&syn, r, g), r)
+#define KWD(k)         yed_syntax_kwd(&syn, k)
 
-int yed_plugin_boot(yed_plugin *self) {
-    YED_PLUG_VERSION_CHECK();
+#ifdef __APPLE__
+#define WB "[[:>:]]"
+#else
+#define WB "\\b"
+#endif
 
-    yed_event_handler line;
-
-    yed_plugin_set_unload_fn(self, unload);
-
-
-    line.kind = EVENT_LINE_PRE_DRAW;
-    line.fn   = syntax_sh_line_handler;
-
-    yed_plugin_add_event_handler(self, line);
-
-    highlight_info_make(&hinfo);
-
-    highlight_numbers(&hinfo);
-
-    highlight_within(&hinfo, "$(", ")", 0, -1, HL_CON);
-    highlight_to_eol_from(&hinfo, "#", HL_COMMENT);
-    highlight_within(&hinfo, "\"", "\"", '\\', -1, HL_STR);
-
-    ys->redraw = 1;
-
-    return 0;
-}
-
-void unload(yed_plugin *self) {
-    highlight_info_free(&hinfo);
-    ys->redraw = 1;
-}
-
-void syntax_sh_line_handler(yed_event *event) {
+void estyle(yed_event *event)   { yed_syntax_style_event(&syn, event);         }
+void ebuffdel(yed_event *event) { yed_syntax_buffer_delete_event(&syn, event); }
+void ebuffmod(yed_event *event) { yed_syntax_buffer_mod_event(&syn, event);    }
+void eline(yed_event *event)  {
     yed_frame *frame;
-    yed_line  *line;
-    yed_attrs  attn;
-    yed_attrs  fn;
-    yed_attrs  fn1;
-    yed_glyph  first;
-    yed_glyph *git;
-    yed_attrs *ait;
-    int        col;
-    int        i;
-    int        colon_col;
-    int        save_col;
-    int        found;
-    int        first_space;
-    int        space_col;
 
     frame = event->frame;
 
@@ -65,76 +47,71 @@ void syntax_sh_line_handler(yed_event *event) {
         return;
     }
 
-    highlight_line(&hinfo, event);
+    yed_syntax_line_event(&syn, event);
+}
 
-    line = yed_buff_get_line(event->frame->buffer, event->row);
 
-    if (line->visual_width == 0) { return; }
+void unload(yed_plugin *self) {
+    yed_syntax_free(&syn);
+}
 
-    attn    = yed_active_style_get_attention();
-    attn.bg = attn.fg;
-    fn      = yed_active_style_get_code_fn_call();
-    fn1      = yed_active_style_get_code_keyword();
+int yed_plugin_boot(yed_plugin *self) {
+    yed_event_handler style;
+    yed_event_handler buffdel;
+    yed_event_handler buffmod;
+    yed_event_handler line;
 
-    first = *yed_line_col_to_glyph(line, 1);
 
-    if (first.c == '\t' || first.c == ' ') {
-        col = 1;
-        yed_line_glyph_traverse(*line, git) {
-            if (git->c == ' ') {
-                ait = array_item(event->line_attrs, col - 1);
-                yed_combine_attrs(ait, &attn);
-            } else if (git->c != '\t') {
-                goto Var;
-            }
-            col += yed_get_glyph_width(*git);
-        }
-    } else {
-        col       = 1;
-        colon_col = 0;
-        yed_line_glyph_traverse(*line, git) {
-            if (git->c == ' ') { break; }
-            if (git->c == ':') {
-                colon_col = col;
-                break;
-            }
-            col += yed_get_glyph_width(*git);
-        }
+    YED_PLUG_VERSION_CHECK();
 
-        if (colon_col) {
-            for (i = 1; i < colon_col; i += 1) {
-                ait = array_item(event->line_attrs, i - 1);
-                yed_combine_attrs(ait, &fn);
-            }
-        }else {
-            col = 1;
-            goto Var;
-        }
-    }
-    goto Done;
+    yed_plugin_set_unload_fn(self, unload);
 
-Var:;
-    save_col = col;
-    found = 0;
-    first_space = 0;
-    space_col = 0;
-    yed_line_glyph_traverse(*line, git) {
-        if (git->c == '=') {
-            found = 1;
-            break;
-        }else if(git->c == ' ' && first_space == 0) {
-            space_col = col;
-            first_space = 1;
-        }
-        col += yed_get_glyph_width(*git);
-    }
+    style.kind = EVENT_STYLE_CHANGE;
+    style.fn   = estyle;
+    yed_plugin_add_event_handler(self, style);
 
-    if (found) {
-        for (i = save_col; i < space_col; i += 1) {
-            ait = array_item(event->line_attrs, i - 1);
-            yed_combine_attrs(ait, &fn1);
-        }
-    }
+    buffdel.kind = EVENT_BUFFER_PRE_DELETE;
+    buffdel.fn   = ebuffdel;
+    yed_plugin_add_event_handler(self, buffdel);
 
-Done:;
+    buffmod.kind = EVENT_BUFFER_POST_MOD;
+    buffmod.fn   = ebuffmod;
+    yed_plugin_add_event_handler(self, buffmod);
+
+    line.kind = EVENT_LINE_PRE_DRAW;
+    line.fn   = eline;
+    yed_plugin_add_event_handler(self, line);
+
+
+    SYN();
+        APUSH("&code-comment");
+            RANGE("#"); ONELINE();
+            ENDRANGE("$");
+        APOP();
+
+        APUSH("&code-string");
+            RANGE("\""); SKIP("\\\\\""); ENDRANGE("\"");
+            RANGE("'");  SKIP("\\\\'");  ENDRANGE("'");
+        APOP();
+
+        APUSH("&code-number");
+            REGEXSUB("(^|[^[:alnum:]_])(-?([[:digit:]]+\\.[[:digit:]]*)|(([[:digit:]]*\\.[[:digit:]]+)))"WB, 2);
+            REGEXSUB("(^|[^[:alnum:]_])(-?[[:digit:]]+)"WB, 2);
+            REGEXSUB("(^|[^[:alnum:]_])(0[xX][0-9a-fA-F]+)"WB, 2);
+        APOP();
+
+        APUSH("&code-control-flow");
+            REGEXSUB("([A-Za-z]+)(:)", 1);
+        APOP();
+
+        APUSH("&code-keyword");
+            REGEXSUB("([-])([[:alnum:]]+)", 2);
+        APOP();
+
+        APUSH("&attention inverse");
+            REGEXSUB("(^[ ]+)", 1);
+        APOP();
+    ENDSYN();
+
+    return 0;
 }
